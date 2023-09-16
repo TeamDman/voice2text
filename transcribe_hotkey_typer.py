@@ -129,7 +129,7 @@ async def main():
             result = await result_queue.get()
             segments = result["segments"]
             print("[MAIN] Transcribing...", segments)
-            to_type = " ".join([segment["text"] for segment in segments])
+            to_type = " ".join([segment["text"] for segment in segments]).strip()
             print("[MAIN] Typing...", to_type)
             pyautogui.typewrite(to_type)
     except KeyboardInterrupt:

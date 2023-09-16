@@ -14,6 +14,10 @@ pip install pyautogui pynput pyaudio speechrecognition sounddevice pydub
 
 ## Usage
 
+```pwsh
 python .\transcribe_hotkey_typer.py
+```
+
+You need to hold the hotkey until it types. Default is F23, which I have bound to a mouse button.
 
 When you hit Ctrl+C, the program will wait for you to say something before the voice thread will exit.
