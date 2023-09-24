@@ -7,6 +7,7 @@ import torch
 import numpy as np
 import whisperx
 from typing import *
+from loguru import logger
 
 async def record_audio(
     audio_queue: asyncio.Queue[torch.Tensor],
@@ -23,18 +24,32 @@ async def record_audio(
 
     loop = asyncio.get_running_loop()
 
-    print("[LISTEN] Starting listener")
-    with sr.Microphone(sample_rate=16000) as source:
-        print("[LISTEN] found microphone")
-        while not stop_future.done():
-            audio = await loop.run_in_executor(None, r.listen, source)
-            if is_listening.is_set():
-                print("[LISTEN] Got audio, was listening")
-                np_audio = np.frombuffer(audio.get_raw_data(), np.int16).flatten().astype(np.float32) / 32768.0
-                await audio_queue.put(np_audio)
-            else:
-                print("[LISTEN] Got audio, wasn't listening")
-    print("[LISTEN] Listener finished")
+    logger.info("Starting listener")
+    logbackoff = 0
+    while not stop_future.done():
+        try:
+            desired = [(i,v) for i,v in enumerate(sr.Microphone.list_microphone_names()) if v == "Microphone (WOER)"]
+            if len(desired) == 0:
+                if logbackoff > 0:
+                    logbackoff -= 1
+                else:
+                    logger.info("Desired microphone not found, waiting...")
+                    logbackoff = 10
+                await asyncio.sleep(1)
+                continue
+            with sr.Microphone(sample_rate=16000, device_index=desired[0][0]) as source:
+                logger.info("Found microphone")
+                while not stop_future.done():
+                    audio = await loop.run_in_executor(None, r.listen, source)
+                    if is_listening.is_set():
+                        logger.info("Got audio, was listening")
+                        np_audio = np.frombuffer(audio.get_raw_data(), np.int16).flatten().astype(np.float32) / 32768.0
+                        await audio_queue.put(np_audio)
+                    else:
+                        logger.info("Got audio, wasn't listening")
+        except OSError:
+            logger.exception(f"Microphone error, was it unplugged?")
+    logger.info("Listener finished")
 
 async def transcribe_audio(
     audio_queue: asyncio.Queue[torch.Tensor],
@@ -42,14 +57,14 @@ async def transcribe_audio(
     audio_model: Any,
     stop_future: asyncio.Future
 ):
-    print("[TRANS] Starting transcriber")
+    logger.info("Starting transcriber")
     while not stop_future.done():
         audio_data = await audio_queue.get()
         result = audio_model.transcribe(audio_data, batch_size=16)
         # predicted_text = str(result["text"]).strip()
-        print(f"[TRANS] Got result {result}")
+        logger.info(f"Got result {result}")
         await result_queue.put(result)
-    print("[TRANS] Transcriber finished")
+    logger.info("Transcriber finished")
 
 async def start_audio_transcription_backend(is_listening: asyncio.Event, stop_future: asyncio.Future):
     model = "large-v2"
@@ -88,12 +103,12 @@ async def start_keyboard_backend(is_listening: asyncio.Event, stop_future: async
 
     def on_press(key):
         if key == keyboard.Key.f23 and not is_listening.is_set():
-            print("[HOTKEY] F23 pressed, starting transcription.")
+            logger.info("F23 pressed, starting transcription.")
             is_listening.set()
 
     def on_release(key):
         if key == keyboard.Key.f23:
-            print("[HOTKEY] F23 released, stopping transcription.")
+            logger.info("F23 released, stopping transcription.")
             is_listening.clear()
 
     def listen_for_keys():
@@ -101,6 +116,7 @@ async def start_keyboard_backend(is_listening: asyncio.Event, stop_future: async
             listener.join()
 
     listener_thread = threading.Thread(target=listen_for_keys)
+    listener_thread.daemon = True
     listener_thread.start()
 
     def stop_check():
@@ -109,6 +125,7 @@ async def start_keyboard_backend(is_listening: asyncio.Event, stop_future: async
         listener_thread.join()
 
     stop_check_thread = threading.Thread(target=stop_check)
+    stop_check_thread.daemon = True
     stop_check_thread.start()
 
         
@@ -117,24 +134,28 @@ async def main():
     stop_future = asyncio.Future()
     is_listening = asyncio.Event()
 
-    print("[MAIN] starting audio backend")
+    logger.info("Starting audio backend")
     result_queue = await start_audio_transcription_backend(is_listening, stop_future)
     
-    print("[MAIN] starting keyboard backend")
+    logger.info("Starting keyboard backend")
     asyncio.create_task(start_keyboard_backend(is_listening, stop_future))
 
-    print("[MAIN] Beginning main loop - hold F23 to perform transcription")
+    logger.info("Beginning main loop - hold F23 to perform transcription")
     try:
         while True:
             result = await result_queue.get()
             segments = result["segments"]
-            print("[MAIN] Transcribing...", segments)
+            logger.info("Transcribing...", segments)
             to_type = " ".join([segment["text"] for segment in segments]).strip()
-            print("[MAIN] Typing...", to_type)
+            logger.info("Typing...", to_type)
             pyautogui.typewrite(to_type)
     except KeyboardInterrupt:
-        print("[MAIN] Stopping...")
+        logger.info("Stopping...")
         stop_future.set_result(True)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Exiting...")
+        exit(0)
