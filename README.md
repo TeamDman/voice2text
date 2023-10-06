@@ -9,7 +9,7 @@ Install [whisperx](https://github.com/m-bain/whisperX), which creates a new cond
 Install our dependencies
 
 ```pwsh
-pip install pyautogui pynput pyaudio speechrecognition sounddevice pydub
+pip install pyautogui pynput pyaudio speechrecognition sounddevice pydub loguru
 ```
 
 ## Usage
