@@ -68,9 +68,11 @@ async def transcribe_audio(
 
 async def start_audio_transcription_backend(is_listening: asyncio.Event, stop_future: asyncio.Future):
     if torch.cuda.is_available():
+        # https://huggingface.co/openai/whisper-large-v2
         model = "large-v2"
         audio_model = whisperx.load_model(model, device="cuda", language="en")
     else:
+        # https://huggingface.co/openai/whisper-small.en
         model = "small.en"
         audio_model = whisperx.load_model(model, device="cpu", language="en", compute_type="float32")
 
