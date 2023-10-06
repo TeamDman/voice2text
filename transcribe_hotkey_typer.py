@@ -108,12 +108,12 @@ async def start_keyboard_backend(is_listening: asyncio.Event, stop_future: async
         return key == keyboard.Key.f23 or key == keyboard.Key.pause
     def on_press(key):
         if is_activation_key(key) and not is_listening.is_set():
-            logger.info("F23 pressed, starting transcription.")
+            logger.info("activation key pressed, starting transcription.")
             is_listening.set()
 
     def on_release(key):
         if is_activation_key(key):
-            logger.info("F23 released, stopping transcription.")
+            logger.info("activation key released, stopping transcription.")
             is_listening.clear()
 
     def listen_for_keys():
@@ -145,7 +145,7 @@ async def main():
     logger.info("Starting keyboard backend")
     asyncio.create_task(start_keyboard_backend(is_listening, stop_future))
 
-    logger.info("Beginning main loop - hold F23 to perform transcription")
+    logger.info("Beginning main loop - hold activation key to perform transcription")
     try:
         while True:
             result = await result_queue.get()
