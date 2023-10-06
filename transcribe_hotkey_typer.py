@@ -40,7 +40,7 @@ async def record_audio(
             with sr.Microphone(sample_rate=16000, device_index=desired[0][0]) as source:
                 logger.info("Found microphone")
                 while not stop_future.done():
-                    audio = await loop.run_in_executor(None, r.listen, source, timeout=3)
+                    audio = await loop.run_in_executor(None, r.listen, source)
                     if is_listening.is_set():
                         logger.info("Got audio, was listening")
                         np_audio = np.frombuffer(audio.get_raw_data(), np.int16).flatten().astype(np.float32) / 32768.0
