@@ -40,7 +40,7 @@ async def record_audio(
             with sr.Microphone(sample_rate=16000, device_index=desired[0][0]) as source:
                 logger.info("Found microphone")
                 while not stop_future.done():
-                    audio = await loop.run_in_executor(None, r.listen, source)
+                    audio = await loop.run_in_executor(None, r.listen, source, timeout=3)
                     if is_listening.is_set():
                         logger.info("Got audio, was listening")
                         np_audio = np.frombuffer(audio.get_raw_data(), np.int16).flatten().astype(np.float32) / 32768.0
@@ -67,8 +67,12 @@ async def transcribe_audio(
     logger.info("Transcriber finished")
 
 async def start_audio_transcription_backend(is_listening: asyncio.Event, stop_future: asyncio.Future):
-    model = "large-v2"
-    audio_model = whisperx.load_model(model, device="cuda", language="en")
+    if torch.cuda.is_available():
+        model = "large-v2"
+        audio_model = whisperx.load_model(model, device="cuda", language="en")
+    else:
+        model = "small.en"
+        audio_model = whisperx.load_model(model, device="cpu", language="en", compute_type="float32")
 
     energy = 100
     pause = 0.8
@@ -100,14 +104,15 @@ async def start_audio_transcription_backend(is_listening: asyncio.Event, stop_fu
     return result_queue
 
 async def start_keyboard_backend(is_listening: asyncio.Event, stop_future: asyncio.Future):
-
+    def is_activation_key(key):
+        return key == keyboard.Key.f23 or key == keyboard.Key.pause
     def on_press(key):
-        if key == keyboard.Key.f23 and not is_listening.is_set():
+        if is_activation_key(key) and not is_listening.is_set():
             logger.info("F23 pressed, starting transcription.")
             is_listening.set()
 
     def on_release(key):
-        if key == keyboard.Key.f23:
+        if is_activation_key(key):
             logger.info("F23 released, stopping transcription.")
             is_listening.clear()
 
