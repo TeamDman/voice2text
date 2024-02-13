@@ -105,13 +105,20 @@ async def start_audio_transcription_backend(is_listening: asyncio.Event, stop_fu
 
     return result_queue
 
-async def start_keyboard_backend(is_listening: asyncio.Event, stop_future: asyncio.Future):
+async def start_keyboard_backend(
+    is_listening: asyncio.Event,
+    api_listening: asyncio.Event,
+    stop_future: asyncio.Future
+):
     def is_activation_key(key):
         return key == keyboard.Key.f23 or key == keyboard.Key.pause
+
     def on_press(key):
-        if is_activation_key(key) and not is_listening.is_set():
-            logger.info("activation key pressed, starting transcription.")
-            is_listening.set()
+        if is_activation_key(key):
+            if not is_listening.is_set():
+                logger.info("activation key pressed, starting transcription.")
+                is_listening.set()
+            api_listening.clear()  # Clear API listening state on manual activation
 
     def on_release(key):
         if is_activation_key(key):
@@ -146,6 +153,7 @@ import aiohttp.web
 
 async def start_webserver_backend(
     is_listening: asyncio.Event,
+    api_listening: asyncio.Event,
     stop_future: asyncio.Future,
     result_queue:asyncio.Queue[torch.Tensor],
     api_key: str
@@ -157,6 +165,7 @@ async def start_webserver_backend(
         
         logger.info("Starting listening because of API request")
         is_listening.set()
+        api_listening.set()  # Indicate that listening was started via API
         return aiohttp.web.Response(text="Listening started")
 
     async def stop_listening(request):
@@ -166,6 +175,7 @@ async def start_webserver_backend(
         
         logger.info("Stopping listening because of API request")
         is_listening.clear()
+        api_listening.clear()  # Also clear API listening state
         return aiohttp.web.Response(text="Listening stopped")
 
     async def results(request):
@@ -178,8 +188,9 @@ async def start_webserver_backend(
         await ws.prepare(request)
 
         while not ws.closed:
-            if not result_queue.empty():
+            if not result_queue.empty() and api_listening.is_set():
                 result = await result_queue.get()
+                logger.info(f"Sending result {result}")
                 await ws.send_str(str(result))
             else:
                 await asyncio.sleep(0.1)
@@ -214,23 +225,27 @@ async def main():
     
     stop_future = asyncio.Future()
     is_listening = asyncio.Event()
-    # is_api_listening = asyncio.Event()
+    api_listening = asyncio.Event()
 
     logger.info("Starting audio backend")
     result_queue = await start_audio_transcription_backend(is_listening, stop_future)
     
     logger.info("Starting keyboard backend")
-    asyncio.create_task(start_keyboard_backend(is_listening, stop_future))
+    asyncio.create_task(start_keyboard_backend(is_listening, api_listening, stop_future))
 
     if api_key is not None:
         logger.info("API key supplied, starting web server")
-        asyncio.create_task(start_webserver_backend(is_listening, stop_future, result_queue, api_key))
+        asyncio.create_task(start_webserver_backend(is_listening, api_listening, stop_future, result_queue, api_key))
     else:
         logger.warn("No API key supplied, not starting web server")
 
     logger.info("Beginning main loop - hold activation key to perform transcription")
     try:
         while True:
+            if api_listening.is_set():
+                # Avoid consuming so that the websocket can consume instead
+                await asyncio.sleep(1)
+                continue
             result = await result_queue.get()
             segments = result["segments"]
             logger.info("Transcribing...", segments)
