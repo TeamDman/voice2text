@@ -136,8 +136,74 @@ async def start_keyboard_backend(is_listening: asyncio.Event, stop_future: async
     stop_check_thread.start()
 
         
+# async def start_webserver_backend(is_listening: asyncio.Event, stop_future: asyncio.Future, api_key: str):
+#     # we want to start a simple web server with https that uses the api_key auth header
+#     # we want endpoint for /start_listening that will set is_listening to true
+#     # we want endpoint for /stop_listening that will set is_listening to false
+#     # we want endpoint for /results that will be a websocket that will send the results of the transcription
+
+import aiohttp.web
+
+async def start_webserver_backend(is_listening: asyncio.Event, stop_future: asyncio.Future, api_key: str):
+    async def start_listening(request):
+        # Check API key
+        if request.headers.get('Authorization') != api_key:
+            return aiohttp.web.Response(status=401, text='Unauthorized')
+        
+        is_listening.set()
+        return aiohttp.web.Response(text="Listening started")
+
+    async def stop_listening(request):
+        # Check API key
+        if request.headers.get('Authorization') != api_key:
+            return aiohttp.web.Response(status=401, text='Unauthorized')
+        
+        is_listening.clear()
+        return aiohttp.web.Response(text="Listening stopped")
+
+    async def results(request):
+        # Check API key
+        if request.headers.get('Authorization') != api_key:
+            return aiohttp.web.Response(status=401, text='Unauthorized')
+        
+        ws = aiohttp.web.WebSocketResponse()
+        await ws.prepare(request)
+
+        while not ws.closed:
+            if not result_queue.empty():
+                result = await result_queue.get()
+                await ws.send_str(str(result))
+            else:
+                await asyncio.sleep(0.1)
+        
+        return ws
+
+    app = aiohttp.web.Application()
+    app.add_routes([
+        aiohttp.web.get('/start_listening', start_listening),
+        aiohttp.web.get('/stop_listening', stop_listening),
+        aiohttp.web.get('/results', results),
+    ])
+
+    runner = aiohttp.web.AppRunner(app)
+    await runner.setup()
+    site = aiohttp.web.TCPSite(runner, 'localhost', 8080)
+    await site.start()
+
+    # Keep the server running until stop_future is set
+    while not stop_future.done():
+        await asyncio.sleep(1)
+
+    await runner.cleanup()
+
 
 async def main():
+    import sys
+    if len(sys.argv) > 1:
+        api_key = sys.argv[1]
+    else:
+        api_key = None
+    
     stop_future = asyncio.Future()
     is_listening = asyncio.Event()
 
@@ -146,6 +212,12 @@ async def main():
     
     logger.info("Starting keyboard backend")
     asyncio.create_task(start_keyboard_backend(is_listening, stop_future))
+
+    if api_key is not None:
+        logger.info("API key supplied, starting web server")
+        asyncio.create_task(start_webserver_backend(is_listening, stop_future, api_key))
+    else:
+        logger.warn("No API key supplied, not starting web server")
 
     logger.info("Beginning main loop - hold activation key to perform transcription")
     try:
