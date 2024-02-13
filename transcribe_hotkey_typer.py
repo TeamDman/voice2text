@@ -144,12 +144,18 @@ async def start_keyboard_backend(is_listening: asyncio.Event, stop_future: async
 
 import aiohttp.web
 
-async def start_webserver_backend(is_listening: asyncio.Event, stop_future: asyncio.Future, api_key: str):
+async def start_webserver_backend(
+    is_listening: asyncio.Event,
+    stop_future: asyncio.Future,
+    result_queue:asyncio.Queue[torch.Tensor],
+    api_key: str
+):
     async def start_listening(request):
         # Check API key
         if request.headers.get('Authorization') != api_key:
             return aiohttp.web.Response(status=401, text='Unauthorized')
         
+        logger.info("Starting listening because of API request")
         is_listening.set()
         return aiohttp.web.Response(text="Listening started")
 
@@ -158,6 +164,7 @@ async def start_webserver_backend(is_listening: asyncio.Event, stop_future: asyn
         if request.headers.get('Authorization') != api_key:
             return aiohttp.web.Response(status=401, text='Unauthorized')
         
+        logger.info("Stopping listening because of API request")
         is_listening.clear()
         return aiohttp.web.Response(text="Listening stopped")
 
@@ -166,6 +173,7 @@ async def start_webserver_backend(is_listening: asyncio.Event, stop_future: asyn
         if request.headers.get('Authorization') != api_key:
             return aiohttp.web.Response(status=401, text='Unauthorized')
         
+        logger.info("Starting websocket for results")
         ws = aiohttp.web.WebSocketResponse()
         await ws.prepare(request)
 
@@ -206,6 +214,7 @@ async def main():
     
     stop_future = asyncio.Future()
     is_listening = asyncio.Event()
+    # is_api_listening = asyncio.Event()
 
     logger.info("Starting audio backend")
     result_queue = await start_audio_transcription_backend(is_listening, stop_future)
@@ -215,7 +224,7 @@ async def main():
 
     if api_key is not None:
         logger.info("API key supplied, starting web server")
-        asyncio.create_task(start_webserver_backend(is_listening, stop_future, api_key))
+        asyncio.create_task(start_webserver_backend(is_listening, stop_future, result_queue, api_key))
     else:
         logger.warn("No API key supplied, not starting web server")
 
