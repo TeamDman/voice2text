@@ -1,14 +1,17 @@
-import threading
+from loguru import logger
 from pynput import keyboard
+from typing import *
+import aiohttp.web
+import asyncio
+import json
+import numpy as np
 import pyautogui
 import speech_recognition as sr
-import asyncio
-import torch
-import numpy as np
-import whisperx
-from typing import *
-from loguru import logger
 import ssl
+import threading
+import torch
+import uuid
+import whisperx
 
 async def record_audio(
     audio_queue: asyncio.Queue[torch.Tensor],
@@ -143,20 +146,12 @@ async def start_keyboard_backend(
     stop_check_thread.daemon = True
     stop_check_thread.start()
 
-        
-# async def start_webserver_backend(is_listening: asyncio.Event, stop_future: asyncio.Future, api_key: str):
-#     # we want to start a simple web server with https that uses the api_key auth header
-#     # we want endpoint for /start_listening that will set is_listening to true
-#     # we want endpoint for /stop_listening that will set is_listening to false
-#     # we want endpoint for /results that will be a websocket that will send the results of the transcription
-
-import aiohttp.web
+    
 
 async def start_webserver_backend(
     is_listening: asyncio.Event,
     api_listening: asyncio.Event,
     stop_future: asyncio.Future,
-    result_queue:asyncio.Queue[torch.Tensor],
     port: int,
     api_key: str
 ):
@@ -186,18 +181,24 @@ async def start_webserver_backend(
             return aiohttp.web.Response(status=401, text='Unauthorized')
         
         logger.info("Starting websocket for results")
-        ws = aiohttp.web.WebSocketResponse()
-        await ws.prepare(request)
+        return await websocket_handler(request)
+        # ws = aiohttp.web.WebSocketResponse()
+        # await ws.prepare(request)
 
-        while not ws.closed:
-            if not result_queue.empty() and api_listening.is_set():
-                result = await result_queue.get()
-                logger.info(f"Sending result {result}")
-                await ws.send_str(str(result))
-            else:
-                await asyncio.sleep(0.1)
-        
-        return ws
+        # while not ws.closed:
+        #     if not result_queue.empty() and api_listening.is_set():
+        #         result = await result_queue.get()
+        #         if not api_listening.is_set():
+        #             # we accidentally ate a message
+        #             # send it again
+        #             await result_queue.put(result)
+        #             continue
+        #         logger.info(f"Sending result {result}")
+        #         await ws.send_str(json.dumps(result))
+        #     else:
+        #         await asyncio.sleep(0.1)
+        # logger.info("Websocket closed")
+        # return ws
     
     async def index(request):
         return aiohttp.web.Response(text="Ahoy!")
@@ -228,6 +229,39 @@ async def start_webserver_backend(
     await runner.cleanup()
 
 
+# Global registry of active websocket queues
+active_websockets = {}
+
+async def websocket_handler(request):
+    ws = aiohttp.web.WebSocketResponse()
+    await ws.prepare(request)
+
+    # Generate a unique ID for each websocket session
+    session_id = str(uuid.uuid4())
+    ws_queue = asyncio.Queue()
+    active_websockets[session_id] = ws_queue
+
+    try:
+        while not ws.closed:
+            result = await ws_queue.get()
+            await ws.send_str(json.dumps(result))
+    finally:
+        # Cleanup on disconnect
+        del active_websockets[session_id]
+        await ws_queue.put('STOP')  # Signal to potentially stop the router if needed
+        logger.info("Websocket closed")
+
+    return ws
+
+async def start_background_router(api_listening: asyncio.Event, result_queue: asyncio.Queue[str], typewriter_queue: asyncio.Queue[str], stop_future: asyncio.Future):
+    while not stop_future.done():
+        result = await result_queue.get()
+        if api_listening.is_set():
+            for session_id, ws_queue in active_websockets.items():
+                await ws_queue.put(result)  # Forward result to each websocket queue
+        else:
+            await typewriter_queue.put(result)  # Forward result to the typewriter queue
+            
 async def main():
     import sys
     if len(sys.argv) > 2:
@@ -242,24 +276,24 @@ async def main():
 
     logger.info("Starting audio backend")
     result_queue = await start_audio_transcription_backend(is_listening, stop_future)
-    
+    typewriter_queue: asyncio.Queue[str] = asyncio.Queue()
+
     logger.info("Starting keyboard backend")
     asyncio.create_task(start_keyboard_backend(is_listening, api_listening, stop_future))
 
+    logger.info("Starting background router")
+    asyncio.create_task(start_background_router(api_listening, result_queue, typewriter_queue, stop_future))
+
     if api_key is not None:
         logger.info("API key supplied, starting web server")
-        asyncio.create_task(start_webserver_backend(is_listening, api_listening, stop_future, result_queue, port, api_key))
+        asyncio.create_task(start_webserver_backend(is_listening, api_listening, stop_future, port, api_key))
     else:
         logger.warn("No API key supplied, not starting web server")
 
     logger.info("Beginning main loop - hold activation key to perform transcription")
     try:
         while True:
-            if api_listening.is_set():
-                # Avoid consuming so that the websocket can consume instead
-                await asyncio.sleep(1)
-                continue
-            result = await result_queue.get()
+            result = await typewriter_queue.get()
             segments = result["segments"]
             logger.info("Transcribing...", segments)
             to_type = " ".join([segment["text"] for segment in segments]).strip()
