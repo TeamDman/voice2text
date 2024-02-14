@@ -8,6 +8,7 @@ import numpy as np
 import whisperx
 from typing import *
 from loguru import logger
+import ssl
 
 async def record_audio(
     audio_queue: asyncio.Queue[torch.Tensor],
@@ -156,6 +157,7 @@ async def start_webserver_backend(
     api_listening: asyncio.Event,
     stop_future: asyncio.Future,
     result_queue:asyncio.Queue[torch.Tensor],
+    port: int,
     api_key: str
 ):
     async def start_listening(request):
@@ -196,17 +198,27 @@ async def start_webserver_backend(
                 await asyncio.sleep(0.1)
         
         return ws
+    
+    async def index(request):
+        return aiohttp.web.Response(text="Ahoy!")
 
     app = aiohttp.web.Application()
     app.add_routes([
-        aiohttp.web.get('/start_listening', start_listening),
-        aiohttp.web.get('/stop_listening', stop_listening),
+        aiohttp.web.post('/start_listening', start_listening),
+        aiohttp.web.post('/stop_listening', stop_listening),
         aiohttp.web.get('/results', results),
+        aiohttp.web.get('/', index),
     ])
 
     runner = aiohttp.web.AppRunner(app)
     await runner.setup()
-    site = aiohttp.web.TCPSite(runner, 'localhost', 8080)
+
+    
+    ssl_context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+    ssl_context.load_cert_chain("localhost.pem", "localhost-key.pem")
+
+    logger.info(f"Starting web server on port {port}")
+    site = aiohttp.web.TCPSite(runner, "localhost", port, ssl_context=ssl_context)
     await site.start()
 
     # Keep the server running until stop_future is set
@@ -218,8 +230,9 @@ async def start_webserver_backend(
 
 async def main():
     import sys
-    if len(sys.argv) > 1:
-        api_key = sys.argv[1]
+    if len(sys.argv) > 2:
+        port = sys.argv[1]
+        api_key = sys.argv[2]
     else:
         api_key = None
     
@@ -235,7 +248,7 @@ async def main():
 
     if api_key is not None:
         logger.info("API key supplied, starting web server")
-        asyncio.create_task(start_webserver_backend(is_listening, api_listening, stop_future, result_queue, api_key))
+        asyncio.create_task(start_webserver_backend(is_listening, api_listening, stop_future, result_queue, port, api_key))
     else:
         logger.warn("No API key supplied, not starting web server")
 

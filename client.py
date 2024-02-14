@@ -4,8 +4,9 @@ import sys
 
 from concurrent.futures import ThreadPoolExecutor
 
-API_KEY = 'abc123'
-SERVER_URL = 'http://localhost:8080'
+API_KEY: str = None
+PORT: int = None
+SERVER_URL = 'https://localhost'
 
 async def read_input(executor):
     loop = asyncio.get_running_loop()
@@ -22,15 +23,15 @@ async def read_input(executor):
             print("Unknown command.")
 
 async def send_command(command):
-    url = f"{SERVER_URL}/{command}_listening"
+    url = f"{SERVER_URL}:{PORT}/{command}_listening"
     headers = {'Authorization': API_KEY}
     async with aiohttp.ClientSession() as session:
-        async with session.get(url, headers=headers) as response:
+        async with session.post(url, headers=headers) as response:
             print(f"Command '{command}': {response.status}")
             print(await response.text())
 
 async def receive_results():
-    url = f"{SERVER_URL}/results"
+    url = f"{SERVER_URL}:{PORT}/results"
     headers = {'Authorization': API_KEY}
     async with aiohttp.ClientSession() as session:
         async with session.ws_connect(url, headers=headers) as ws:
@@ -60,6 +61,7 @@ async def main():
         pass
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1:
-        API_KEY = sys.argv[1]
+    assert len(sys.argv) > 2, "Usage: client.py <port> <api_key>"
+    PORT = sys.argv[1]
+    API_KEY = sys.argv[2]
     asyncio.run(main())

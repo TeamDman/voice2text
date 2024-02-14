@@ -12,6 +12,13 @@ Install our dependencies
 pip install pyautogui pynput pyaudio speechrecognition sounddevice pydub loguru
 ```
 
+### SSL
+
+```pwsh
+mkcert -install
+mkcert localhost
+```
+
 ## Usage
 
 ```pwsh
