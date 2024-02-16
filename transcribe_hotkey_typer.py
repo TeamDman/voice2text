@@ -210,6 +210,7 @@ async def start_webserver_worker(
                 if message.type == aiohttp.WSMsgType.TEXT:
                     content = message.data
                     if content == "keepalive":
+                        logger.debug("Received keepalive from {}", entry.session_id)
                         entry.latest_keepalive = asyncio.get_event_loop().time()
                     else:
                         logger.warning(f"Unknown message received: {content}")
@@ -224,7 +225,6 @@ async def start_webserver_worker(
             timeout = 10
             while not stop_future.done():
                 await asyncio.sleep(10)
-                logger.debug("Keepalive")
                 for session_id, entry in active_websockets.items():
                     if asyncio.get_event_loop().time() - entry.latest_keepalive > timeout:
                         logger.info(f"No keepalive received from session {session_id} in the past {timeout} seconds, closing")
@@ -309,7 +309,7 @@ async def main():
                 audio_queue,
                 keyboard_says_listen,
                 api_says_listen,
-                energy=100,
+                energy=300,
                 pause=0.8,
                 dynamic_energy=False,
                 stop_future=stop_future,
