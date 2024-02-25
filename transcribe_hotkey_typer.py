@@ -330,7 +330,7 @@ async def main():
             logger.info("API key supplied, starting webserver worker")
             asyncio.create_task(start_webserver_worker(api_says_listen, stop_future, port, api_key))
         else:
-            logger.warn("No API key supplied, not starting web server")
+            logger.warning("No API key supplied, not starting web server")
 
         logger.info("Beginning main loop - hold activation key to perform transcription")
         try:
