@@ -92,19 +92,29 @@ async def start_keyboard_worker(
     stop_future: asyncio.Future
 ):
     try:
-        def is_activation_key(key):
-            return key == keyboard.Key.f23 or key == keyboard.Key.pause
+        def is_push_to_talk_key(key):
+            return key == keyboard.Key.f23
+
+        def is_toggle_key(key):
+            return key == keyboard.Key.pause
 
         def on_press(key):
-            if is_activation_key(key):
+            if is_push_to_talk_key(key):
                 if not keyboard_says_listen.is_set():
-                    logger.info("activation key pressed, starting transcription.")
+                    logger.info("Push-to-talk key pressed, starting transcription.")
                     keyboard_says_listen.set()
-                api_says_listen.clear() # Clear API listening state on manual activation
+            elif is_toggle_key(key):
+                if keyboard_says_listen.is_set():
+                    logger.info("Toggle key pressed, stopping transcription.")
+                    keyboard_says_listen.clear()
+                else:
+                    logger.info("Toggle key pressed, starting transcription.")
+                    keyboard_says_listen.set()
+            api_says_listen.clear()  # Clear API listening state on manual activation
 
         def on_release(key):
-            if is_activation_key(key):
-                logger.info("activation key released, stopping transcription.")
+            if is_push_to_talk_key(key) and not keyboard_says_listen.is_set():
+                logger.info("Push-to-talk key released, stopping transcription.")
                 keyboard_says_listen.clear()
 
         def listen_for_keys():
