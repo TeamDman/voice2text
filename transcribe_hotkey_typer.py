@@ -289,11 +289,17 @@ async def start_router_worker(api_says_listen: asyncio.Event, result_queue: asyn
 async def main():
     try:
         import sys
-        if len(sys.argv) > 2:
-            port = sys.argv[1]
-            api_key = sys.argv[2]
-        else:
-            api_key = None
+        import os
+        
+        port = os.getenv('port')
+        api_key = os.getenv('api_key')
+
+
+        # if len(sys.argv) > 2:
+        #     port = sys.argv[1]
+        #     api_key = sys.argv[2]
+        # else:
+        #     api_key = None
         
         stop_future = asyncio.Future()
         keyboard_says_listen = asyncio.Event()
