@@ -113,7 +113,7 @@ async def start_keyboard_worker(
             api_says_listen.clear()  # Clear API listening state on manual activation
 
         def on_release(key):
-            if is_push_to_talk_key(key) and not keyboard_says_listen.is_set():
+            if is_push_to_talk_key(key) and keyboard_says_listen.is_set():
                 logger.info("Push-to-talk key released, stopping transcription.")
                 keyboard_says_listen.clear()
 
