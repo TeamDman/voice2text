@@ -1,0 +1,8 @@
+[package]
+name = "voice_to_text"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+cpal = "0.14"
+hound = "3.4"
