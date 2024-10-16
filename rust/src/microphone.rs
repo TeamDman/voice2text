@@ -100,33 +100,54 @@ impl AudioChunk {
         // resample to 16khz
         if self.sample_rate != SAMPLE_RATE {
             debug!(
-                "Resampling audio from {} to {}",
-                self.sample_rate.0, SAMPLE_RATE.0
+                "Resampling {} audio samples from {} to {}",
+                self.data.len(),
+                self.sample_rate.0,
+                SAMPLE_RATE.0
             );
+            let chunk_size = 441; // frames per buffer
             let mut resampler = rubato::FftFixedInOut::<f32>::new(
-                self.sample_rate.0 as usize,
-                SAMPLE_RATE.0 as usize,
-                441, // frames per buffer
+                self.sample_rate.0 as usize, // 48,000
+                SAMPLE_RATE.0 as usize,      // 16,000
+                chunk_size,
                 self.channels as usize,
             )
             .expect("Failed to create resampler");
+
+            let mut resampled_data = Vec::new();
+            for chunk in self.data.chunks(chunk_size) {
+                // If the last chunk is smaller than chunk_size, pad it with zeros
+                let mut input_chunk = chunk.to_vec();
+                if input_chunk.len() < chunk_size {
+                    input_chunk.resize(chunk_size, 0.0);
+                }
+
+                let output = resampler
+                    .process(&[input_chunk], None)
+                    .expect("Resampling failed");
+
+                for channel_data in output {
+                    resampled_data.extend(channel_data);
+                }
+            }
+
             let before = self.data.len();
-            self.data = resampler
-                .process(&[self.data], None)
-                .expect("Resampling failed")
-                .into_iter()
-                .flatten()
-                .collect();
+            self.data = resampled_data;
             let after = self.data.len();
             let ratio = self.sample_rate.0 as f32 / SAMPLE_RATE.0 as f32;
             debug!(
                 "Resampling complete: {} samples -> {} samples (ratio: {})",
                 before, after, ratio
             );
-            if after * ratio as usize != before {
+
+            if (after as f32 * ratio - before as f32).abs() > 1.0 {
                 let observed_ratio = before as f32 / after as f32;
-                error!("Resampling failed: {} samples -> {} samples, expected ratio {} observed ratio {}", before, after, ratio, observed_ratio);
+                error!(
+                    "Resampling failed: {} samples -> {} samples, expected ratio {} observed ratio {}",
+                    before, after, ratio, observed_ratio
+                );
             }
+
             self.sample_rate = SAMPLE_RATE;
         }
         self
