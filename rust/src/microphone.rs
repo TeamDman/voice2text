@@ -140,8 +140,8 @@ impl AudioChunk {
                 before, after, ratio
             );
 
-            if (after as f32 * ratio - before as f32).abs() > 1.0 {
-                let observed_ratio = before as f32 / after as f32;
+            let observed_ratio = before as f32 / after as f32;
+            if (observed_ratio - ratio).abs() > 1.0 {
                 error!(
                     "Resampling failed: {} samples -> {} samples, expected ratio {} observed ratio {}",
                     before, after, ratio, observed_ratio
