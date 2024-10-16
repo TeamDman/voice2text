@@ -3,12 +3,14 @@
 use crate::config::{AppConfig, MicrophoneConfig};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{ChannelCount, SampleFormat, SampleRate, Stream};
+use rubato::Resampler;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use tracing::{error, info};
+use tracing::{debug, error, info};
+
+pub const SAMPLE_RATE: SampleRate = SampleRate(16_000);
 
 pub struct Microphone {
-    pub id: String,
     pub name: String,
     pub config: MicrophoneConfig,
     pub state: Arc<Mutex<MicrophoneState>>,
@@ -47,8 +49,8 @@ pub fn initialize_microphones(config: &AppConfig) -> HashMap<String, Microphone>
 
     let mut microphones = HashMap::new();
 
-    for device in devices {
-        let name = device.name().unwrap_or_else(|_| "Unknown".to_string());
+    for (i, device) in devices.enumerate() {
+        let name = device.name().unwrap_or_else(|_| format!("Unknown-{i}"));
         let id = name.clone();
 
         let mic_config = config
@@ -64,7 +66,6 @@ pub fn initialize_microphones(config: &AppConfig) -> HashMap<String, Microphone>
         };
 
         let microphone = Microphone {
-            id: id.clone(),
             name: name.clone(),
             config: mic_config,
             state: Arc::new(Mutex::new(state)),
@@ -80,13 +81,69 @@ pub fn initialize_microphones(config: &AppConfig) -> HashMap<String, Microphone>
 
 pub struct AudioChunk {
     pub data: Vec<f32>,
-    pub sample_rate: SampleRate,
     pub channels: ChannelCount,
+    pub sample_rate: SampleRate,
+}
+
+impl AudioChunk {
+    pub fn downmix(mut self) -> Self {
+        // convert to mono
+        if self.channels > 1 {
+            debug!("Downmixing audio from {} channels to 1", self.channels);
+            self.data = self
+                .data
+                .chunks(self.channels as usize)
+                .map(|chunk| chunk.iter().sum::<f32>() / self.channels as f32)
+                .collect();
+            self.channels = 1;
+        }
+        // resample to 16khz
+        if self.sample_rate != SAMPLE_RATE {
+            debug!(
+                "Resampling audio from {} to {}",
+                self.sample_rate.0, SAMPLE_RATE.0
+            );
+            let mut resampler = rubato::FftFixedInOut::<f32>::new(
+                self.sample_rate.0 as usize,
+                SAMPLE_RATE.0 as usize,
+                441, // frames per buffer
+                self.channels as usize,
+            )
+            .expect("Failed to create resampler");
+            let before = self.data.len();
+            self.data = resampler
+                .process(&[self.data], None)
+                .expect("Resampling failed")
+                .into_iter()
+                .flatten()
+                .collect();
+            let after = self.data.len();
+            let ratio = self.sample_rate.0 as f32 / SAMPLE_RATE.0 as f32;
+            debug!(
+                "Resampling complete: {} samples -> {} samples (ratio: {})",
+                before, after, ratio
+            );
+            if after * ratio as usize != before {
+                let observed_ratio = before as f32 / after as f32;
+                error!("Resampling failed: {} samples -> {} samples, expected ratio {} observed ratio {}", before, after, ratio, observed_ratio);
+            }
+            self.sample_rate = SAMPLE_RATE;
+        }
+        self
+    }
+    pub fn to_byte_slice<'a>(&self) -> &'a [u8] {
+        unsafe {
+            std::slice::from_raw_parts(
+                self.data.as_ptr() as *const u8,
+                self.data.len() * std::mem::size_of::<f32>(),
+            )
+        }
+    }
 }
 
 pub fn start_microphone_streams(
     microphones: &mut HashMap<String, Microphone>,
-    transcription_sender: crossbeam_channel::Sender<AudioChunk>,
+    audio_sender: crossbeam_channel::Sender<AudioChunk>,
 ) {
     for mic in microphones.values_mut() {
         if mic.config.enabled {
@@ -105,7 +162,7 @@ pub fn start_microphone_streams(
 
             let state_clone = mic.state.clone();
             let audio_levels_clone = mic.audio_levels.clone();
-            let transcription_sender_clone = transcription_sender.clone();
+            let audio_sender_clone = audio_sender.clone();
 
             let err_fn = |err| error!("An error occurred on the input stream: {}", err);
 
@@ -123,7 +180,7 @@ pub fn start_microphone_streams(
                             data,
                             &state_clone,
                             &audio_levels_clone,
-                            &transcription_sender_clone,
+                            &audio_sender_clone,
                         )
                     },
                     err_fn,
@@ -139,7 +196,7 @@ pub fn start_microphone_streams(
                             &data_f32,
                             &state_clone,
                             &audio_levels_clone,
-                            &transcription_sender_clone,
+                            &audio_sender_clone,
                         )
                     },
                     err_fn,
@@ -156,12 +213,11 @@ pub fn start_microphone_streams(
                             &data_f32,
                             &state_clone,
                             &audio_levels_clone,
-                            &transcription_sender_clone,
+                            &audio_sender_clone,
                         )
                     },
                     err_fn,
                 ),
-                _ => panic!("Unsupported sample format"),
             }
             .expect("Failed to build input stream");
 

@@ -46,7 +46,7 @@ pub fn initialize_logging() -> Result<()> {
         .with_line_number(true)
         .with_writer(log_file)
         .with_target(false)
-        .with_ansi(false)
+        .with_ansi(true)
         .with_filter(env_filter);
     tracing_subscriber::registry()
         .with(file_subscriber)

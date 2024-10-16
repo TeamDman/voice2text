@@ -1,9 +1,10 @@
 // transcription.rs
 
 use crate::config::AppConfig;
-use crate::microphone::AudioChunk;
-use anyhow::{Context, Result};
+use crate::microphone::{AudioChunk, SAMPLE_RATE};
+use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Local};
+use cpal::SampleRate;
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -28,26 +29,19 @@ pub struct TranscriptionResultSegment {
 
 pub fn send_audio_for_transcription(
     api_url: &str,
-    audio_data: &AudioChunk,
+    audio: AudioChunk,
 ) -> Result<TranscriptionResult> {
-    // Convert audio data to WAV format
-    let wav_data = generate_wav_data(&audio_data.data)?;
+    let audio = audio.downmix();
+    if !matches!(audio, AudioChunk {
+        channels: 1,
+        sample_rate: SAMPLE_RATE,
+        ..
+    }) {
+        bail!("Audio must be mono and 16kHz");
+    }
+    debug!("Sending {} samples", audio.data.len());
 
-    // Convert sample rate and channel count to bytes
-    let sample_rate_bytes = audio_data.sample_rate.0.to_le_bytes().to_vec();
-    let channels_bytes = audio_data.channels.to_le_bytes().to_vec();
-
-    // Log the values being sent
-    debug!("Sending audio with sample rate: {}", audio_data.sample_rate.0);
-    debug!("Sending audio with channel count: {}", audio_data.channels);
-    debug!("Audio data length: {}", wav_data.len());
-
-    // Create the body to send: sample rate + channel count + audio data
-    let mut body = sample_rate_bytes;
-    body.extend_from_slice(&channels_bytes);
-    body.extend_from_slice(&wav_data);
-
-    // Log the total byte length
+    let body = audio.to_byte_slice();
     debug!("Total body length: {}", body.len());
 
     // Send the request
@@ -57,7 +51,7 @@ pub fn send_audio_for_transcription(
 
     let response = client
         .post(api_url)
-        .header("Content-Type", "audio/wav")
+        .header("Content-Type", "audio/f32le")
         .body(body)
         .send()
         .context("Failed to send transcription request")?;
@@ -76,26 +70,6 @@ pub fn send_audio_for_transcription(
     }
 }
 
-
-fn generate_wav_data(audio_data: &[f32]) -> Result<Vec<u8>> {
-    let spec = hound::WavSpec {
-        channels: 1,
-        sample_rate: 44100,
-        bits_per_sample: 16,
-        sample_format: hound::SampleFormat::Int,
-    };
-
-    let mut cursor = std::io::Cursor::new(Vec::new());
-    let mut writer = hound::WavWriter::new(&mut cursor, spec)?;
-
-    for sample in audio_data {
-        let amplitude = (sample * i16::MAX as f32) as i16;
-        writer.write_sample(amplitude)?;
-    }
-
-    writer.finalize()?;
-    Ok(cursor.into_inner())
-}
 
 pub fn list_transcript_paths(config: &AppConfig) -> Result<()> {
     let dir = &config.transcription_results_dir;

@@ -37,7 +37,7 @@ struct AppState {
 }
 
 
-pub fn run_app(config: &mut AppConfig, config_path: &PathBuf) -> anyhow::Result<()> {
+pub fn run_app(config: &mut AppConfig) -> anyhow::Result<()> {
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -46,13 +46,13 @@ pub fn run_app(config: &mut AppConfig, config_path: &PathBuf) -> anyhow::Result<
     let mut terminal = Terminal::new(backend)?;
 
     // Channels for inter-thread communication
-    let (transcription_sender, transcription_receiver) = unbounded::<AudioChunk>();
+    let (mic_audio_sender, mic_audio_receiver) = unbounded::<AudioChunk>();
 
     // Initialize microphones
     let mut microphones = initialize_microphones(&config);
 
     // Start microphone streams
-    start_microphone_streams(&mut microphones, transcription_sender.clone());
+    start_microphone_streams(&mut microphones, mic_audio_sender.clone());
 
     // Shared state
     let activity_log = Arc::new(Mutex::new(vec!["Config loaded".to_string()]));
@@ -64,7 +64,7 @@ pub fn run_app(config: &mut AppConfig, config_path: &PathBuf) -> anyhow::Result<
 
     // Spawn a thread to handle transcription
     let app_config_clone = app_state.config.clone();
-    let transcription_receiver_clone = transcription_receiver.clone();
+    let transcription_receiver_clone = mic_audio_receiver.clone();
     let activity_log_clone = activity_log.clone();
     thread::spawn(move || {
         while let Ok(audio_data) = transcription_receiver_clone.recv() {
@@ -72,7 +72,7 @@ pub fn run_app(config: &mut AppConfig, config_path: &PathBuf) -> anyhow::Result<
                 "Received audio data for transcription, got {} samples",
                 audio_data.data.len()
             );
-            match send_audio_for_transcription(&app_config_clone.transcription_api_url, &audio_data)
+            match send_audio_for_transcription(&app_config_clone.transcription_api_url, audio_data)
             {
                 Ok(result) => {
                     let timestamp = chrono::Local::now();

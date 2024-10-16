@@ -93,7 +93,7 @@ fn main() -> Result<()> {
         }
         None => {
             // Launch interactive application
-            ui::run_app(&mut config, &config_path)?;
+            ui::run_app(&mut config)?;
         }
     }
 
