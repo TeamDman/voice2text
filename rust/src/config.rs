@@ -121,7 +121,7 @@ impl Default for KeyConfig {
             callback_toggle_typewriter: 't',
             edit_config: 'e',
             open_config: 'b',
-            open_logs: 'b',
+            open_logs: 'l',
         }
     }
 }
