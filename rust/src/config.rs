@@ -6,7 +6,7 @@ use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 
-use crate::get_project_dirs;
+use crate::{get_config_path, get_project_dirs};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct AppConfig {
@@ -17,6 +17,8 @@ pub struct AppConfig {
     pub transcription_results_dir: PathBuf,
     pub key_config: KeyConfig,
     pub microphones: HashMap<String, MicrophoneConfig>,
+    pub hue_bridge_ip: String,
+    pub hue_username: Option<String>,
 }
 
 impl Default for AppConfig {
@@ -32,6 +34,8 @@ impl Default for AppConfig {
                 .unwrap_or_else(|| PathBuf::from("./transcripts")),
             key_config: KeyConfig::default(),
             microphones: HashMap::new(),
+            hue_bridge_ip: "".to_string(), // Add default empty bridge IP
+            hue_username: None,             // Add default None for username
         }
     }
 }
@@ -49,7 +53,7 @@ impl AppConfig {
             Ok(config) => Ok(config),
             Err(e) => {
                 // prompt the user to panic or overwrite with defualt
-                eprintln!("Error loading config: {:?}", e);
+                eprintln!("Error loading config from {:?}: {:?}", get_config_path()?,e);
                 eprintln!("Overwrite with default config? (y/n)");
                 std::io::stderr().flush()?;
                 let mut input = String::new();
@@ -108,6 +112,8 @@ pub struct KeyConfig {
     pub edit_config: char,
     pub open_config: char,
     pub open_logs: char,
+    pub authenticate_lights: char,
+    pub toggle_chat_lights: char,
 }
 
 impl Default for KeyConfig {
@@ -121,7 +127,9 @@ impl Default for KeyConfig {
             callback_toggle_typewriter: 't',
             edit_config: 'e',
             open_config: 'b',
-            open_logs: 'l',
+            open_logs: 'k',             
+            authenticate_lights: 'l',   
+            toggle_chat_lights: 'c',
         }
     }
 }

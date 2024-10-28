@@ -1,0 +1,1 @@
+- fix writing transcripts to disk not including the timestamp that the transcript was created, right now it has start and end but those are relative

@@ -55,7 +55,8 @@ pub fn get_config_path() -> Result<PathBuf> {
     Ok(project_dirs.config_dir().join("config.json"))
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     // Initialize logging
     logging::initialize_logging()?;
 
@@ -93,7 +94,7 @@ fn main() -> Result<()> {
         }
         None => {
             // Launch interactive application
-            ui::run_app(&mut config)?;
+            ui::run_app(&mut config).await?;
         }
     }
 
