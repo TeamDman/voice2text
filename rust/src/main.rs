@@ -73,7 +73,7 @@ async fn main() -> Result<()> {
     debug!("Using config path: {:?}", config_path);
 
     // Load configuration
-    let mut config = AppConfig::load(&config_path)?;
+    let config = AppConfig::load(&config_path)?;
 
     info!("Running app with command {:?}", cli.command);
 
@@ -94,7 +94,7 @@ async fn main() -> Result<()> {
         }
         None => {
             // Launch interactive application
-            ui::run_app(&mut config).await?;
+            ui::run_app(config).await?;
         }
     }
 

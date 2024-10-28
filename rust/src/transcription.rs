@@ -4,15 +4,12 @@ use crate::config::AppConfig;
 use crate::microphone::{AudioChunk, SAMPLE_RATE};
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Local};
-use cpal::SampleRate;
-use reqwest::blocking::Client;
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tracing::debug;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::path::PathBuf;
-use uuid::Uuid;
+use tracing::debug;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct TranscriptionResult {
@@ -27,16 +24,19 @@ pub struct TranscriptionResultSegment {
     pub end: f32,
 }
 
-pub fn send_audio_for_transcription(
+pub async fn send_audio_for_transcription(
     api_url: &str,
     audio: AudioChunk,
 ) -> Result<TranscriptionResult> {
     let audio = audio.downmix();
-    if !matches!(audio, AudioChunk {
-        channels: 1,
-        sample_rate: SAMPLE_RATE,
-        ..
-    }) {
+    if !matches!(
+        audio,
+        AudioChunk {
+            channels: 1,
+            sample_rate: SAMPLE_RATE,
+            ..
+        }
+    ) {
         bail!("Audio must be mono and 16kHz");
     }
     debug!("Sending {} samples", audio.data.len());
@@ -54,10 +54,11 @@ pub fn send_audio_for_transcription(
         .header("Content-Type", "audio/f32le")
         .body(body)
         .send()
+        .await
         .context("Failed to send transcription request")?;
 
     if response.status().is_success() {
-        let result: Value = response.json()?;
+        let result: Value = response.json().await?;
         debug!("Transcription response: {:?}", result);
         let result = serde_json::from_value::<TranscriptionResult>(result)
             .context("Failed to parse transcription response")?;
@@ -69,7 +70,6 @@ pub fn send_audio_for_transcription(
         ))
     }
 }
-
 
 pub fn list_transcript_paths(config: &AppConfig) -> Result<()> {
     let dir = &config.transcription_results_dir;
