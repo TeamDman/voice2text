@@ -4,6 +4,7 @@ use crate::config::{AppConfig, MicrophoneConfig};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{ChannelCount, SampleFormat, SampleRate, Stream};
 use rubato::Resampler;
+use tokio::sync::mpsc::UnboundedSender;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tracing::{debug, error, info};
@@ -164,7 +165,7 @@ impl AudioChunk {
 
 pub fn start_microphone_streams(
     microphones: &mut HashMap<String, Microphone>,
-    audio_sender: crossbeam_channel::Sender<AudioChunk>,
+    audio_sender: UnboundedSender<AudioChunk>,
 ) {
     for mic in microphones.values_mut() {
         if mic.config.enabled {
@@ -255,7 +256,7 @@ fn process_input_data_f32(
     data: &[f32],
     state: &Arc<Mutex<MicrophoneState>>,
     audio_levels: &Arc<Mutex<Vec<f32>>>,
-    transcription_sender: &crossbeam_channel::Sender<AudioChunk>,
+    transcription_sender: &UnboundedSender<AudioChunk>,
 ) {
     let amplitude = data.iter().map(|&s| s.abs()).sum::<f32>() / data.len() as f32;
 

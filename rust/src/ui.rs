@@ -1,72 +1,72 @@
 // ui.rs
 
-use crate::config::{AppConfig, KeyConfig};
+use crate::config::AppConfig;
+use crate::get_config_path;
 use crate::logging::get_logs_path;
-use crate::microphone::{initialize_microphones, start_microphone_streams, AudioChunk, MicrophoneState};
+use crate::microphone::{
+    initialize_microphones, start_microphone_streams, AudioChunk, Microphone, MicrophoneState,
+};
 use crate::transcription::{
     save_transcription_result, send_audio_for_transcription, TranscriptionResult,
 };
-use crate::{get_config_path, get_project_dirs};
 use anyhow::Context;
-use cpal::SampleRate;
-use crossterm::event::{self, Event as CEvent, KeyCode, KeyEventKind};
+use crossterm::event::{Event as CEvent, EventStream, KeyCode, KeyEvent, KeyEventKind};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
+use futures::{FutureExt, StreamExt};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Style};
 use ratatui::text::Span;
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Sparkline, Tabs};
+use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Tabs};
 use ratatui::{DefaultTerminal, Frame, Terminal};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io;
-use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tracing::{debug, error, info, warn};
-
-use crossbeam_channel::{unbounded, Receiver, Sender};
 
 #[derive(Eq, PartialEq, Debug, Clone, Copy)]
 enum TranscriptionCallback {
     WriteJsonLine,
-    SendTypewriterKeystrokes,
     ChatLights,
 }
 
 enum LightAuthState {
     Unauthenticated,
     AwaitingButtonPress,
-    Authenticated { username: String },
+    Authenticated,
 }
 
 struct AppState {
     config: AppConfig,
     transcription_callbacks: Vec<TranscriptionCallback>,
-    activity_log: Arc<Mutex<Vec<String>>>,
+    activity_log: Vec<String>,
     light_auth_state: LightAuthState,
+    log_sender: UnboundedSender<String>,
 }
 impl AppState {
     fn light_list(&self) -> String {
         match fetch_lights(&self.config) {
-            Ok(lights) => {
-                lights
-                    .iter()
-                    .map(|(id, name)| format!("{}: {}", id, name))
-                    .collect::<Vec<String>>()
-                    .join("\n")
-            }
+            Ok(lights) => lights
+                .iter()
+                .map(|(id, name)| format!("{}: {}", id, name))
+                .collect::<Vec<String>>()
+                .join("\n"),
             Err(e) => {
-                let mut log = self.activity_log.lock().unwrap();
-                log.push(format!("Error fetching lights: {}", e));
+                self.push_activity_log(format!("Error fetching lights: {}", e));
                 "".to_string()
             }
         }
     }
+    fn push_activity_log(&self, entry: impl AsRef<str>) {
+        if let Err(e) = self.log_sender.send(entry.as_ref().to_owned()) {
+            error!("Error sending log entry: {}", e);
+        };
+    }
 }
-
 
 pub async fn run_app(config: &mut AppConfig) -> anyhow::Result<()> {
     // Setup terminal
@@ -77,75 +77,58 @@ pub async fn run_app(config: &mut AppConfig) -> anyhow::Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     // Channels for inter-thread communication
-    let (mic_audio_sender, mic_audio_receiver) = unbounded::<AudioChunk>();
-
-    // Initialize microphones
+    let (mic_audio_sender, mut mic_audio_receiver) = unbounded_channel::<AudioChunk>();
     let mut microphones = initialize_microphones(&config);
-
-    // Start microphone streams
-    start_microphone_streams(&mut microphones, mic_audio_sender.clone());
+    start_microphone_streams(&mut microphones, mic_audio_sender);
 
     // Shared state
-    let activity_log = Arc::new(Mutex::new(vec!["Config loaded".to_string()]));
-
-    let light_auth_state = if let Some(username) = config.hue_username.clone() {
-        LightAuthState::Authenticated { username }
+    let light_auth_state = if config.hue_username.is_some() {
+        LightAuthState::Authenticated
     } else {
         LightAuthState::Unauthenticated
     };
 
-    let mut app_state = AppState {
+    let (log_sender, log_receiver) = unbounded_channel::<String>();
+    let (transcription_sender, transcription_receiver) = unbounded_channel::<TranscriptionResult>();
+
+    let app_state = AppState {
         config: config.clone(),
         transcription_callbacks: vec![TranscriptionCallback::WriteJsonLine],
-        activity_log: activity_log.clone(),
+        activity_log: Vec::new(),
         light_auth_state,
+        log_sender: log_sender.clone(),
     };
-    let app_state = Arc::new(Mutex::new(app_state));
 
     // Spawn a thread to handle transcription
-    let app_config_clone = app_state.lock().unwrap().config.clone();
-    let transcription_receiver_clone = mic_audio_receiver.clone();
-    let activity_log_clone = activity_log.clone();
-    let app_state_clone = app_state.clone();
+    let app_config_clone = app_state.config.clone();
+    let log_sender_clone = log_sender.clone();
     thread::spawn(move || {
-        while let Ok(audio_data) = transcription_receiver_clone.recv() {
-            debug!(
-                "Received audio data for transcription, got {} samples",
-                audio_data.data.len()
-            );
-            match send_audio_for_transcription(&app_config_clone.transcription_api_url, audio_data)
-            {
-                Ok(result) => {
-                    let timestamp = chrono::Local::now();
-                    save_transcription_result(&app_config_clone, &result, timestamp)
-                        .unwrap_or_else(|e| error!("Failed to save transcription: {}", e));
-
-                    let mut log = activity_log_clone.lock().unwrap();
-                    for segment in &result.segments {
-                        info!("Heard \"{}\"", segment.text);
-                        log.push(format!("Heard \"{}\"", segment.text));
-
-                        // Check if ChatLights callback is enabled
-                        let app_state = app_state_clone.lock().unwrap();
-                        if app_state
-                            .transcription_callbacks
-                            .contains(&TranscriptionCallback::ChatLights)
-                        {
-                            if let Err(e) = process_chat_lights(&app_state, &segment.text) {
-                                log.push(format!("Error processing ChatLights: {}", e));
-                            }
-                        }
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            loop {
+                tokio::select! {
+                    Some(audio_data) = mic_audio_receiver.recv() => {
+                        if let Err(e) = handle_audio_data(&app_config_clone, audio_data, &transcription_sender, &log_sender_clone).await {
+                            error!("Error handling audio data: {}", e);
+                        };
                     }
                 }
-                Err(e) => {
-                    error!("Transcription failed: {}", e);
-                }
             }
-        }
+        });
     });
 
     // Main loop
-    let res = run_ui(&mut terminal, &mut microphones, app_state).await;
+    let res = run_ui(
+        &mut terminal,
+        microphones,
+        app_state,
+        log_sender,
+        log_receiver,
+        transcription_receiver,
+    )
+    .await;
 
     // Restore terminal
     disable_raw_mode()?;
@@ -158,66 +141,142 @@ pub async fn run_app(config: &mut AppConfig) -> anyhow::Result<()> {
     res
 }
 
-async fn run_ui(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    microphones: &mut std::collections::HashMap<String, crate::microphone::Microphone>,
-    app_state: Arc<Mutex<AppState>>,
+async fn handle_audio_data(
+    app_config_clone: &AppConfig,
+    audio_data: AudioChunk,
+    transcription_sender: &UnboundedSender<TranscriptionResult>,
+    log_sender: &UnboundedSender<String>,
 ) -> anyhow::Result<()> {
-    let tick_rate = Duration::from_millis(200);
-    let mut last_tick = Instant::now();
+    debug!(
+        "Received audio data for transcription, got {} samples",
+        audio_data.data.len()
+    );
+    match send_audio_for_transcription(&app_config_clone.transcription_api_url, audio_data) {
+        Ok(result) => {
+            let timestamp = chrono::Local::now();
+            save_transcription_result(&app_config_clone, &result, timestamp)
+                .unwrap_or_else(|e| error!("Failed to save transcription: {}", e));
 
-    let app_state = &mut app_state.lock().unwrap();
-    loop {
-        terminal.draw(|f| ui(f, microphones, app_state))?;
-
-        let timeout = tick_rate
-            .checked_sub(last_tick.elapsed())
-            .unwrap_or_else(|| Duration::from_secs(0));
-
-        if crossterm::event::poll(timeout)? {
-            if let CEvent::Key(key) = event::read()? {
-                if key.kind != KeyEventKind::Press {
-                    continue;
-                }
-                match key.code {
-                    KeyCode::Char(x) if x == app_state.config.key_config.quit => {
-                        break;
-                    }
-                    KeyCode::Char(x) if x == app_state.config.key_config.help => {}
-                    KeyCode::Char(x) if x == app_state.config.key_config.edit_config => {
-                        edit_config(&app_state.config.config_editor, terminal)?;
-                    }
-                    KeyCode::Char(x) if x == app_state.config.key_config.open_config => {
-                        open_config(&app_state.config.big_config_editor)?;
-                    }
-                    KeyCode::Char(x) if x == app_state.config.key_config.open_logs => {
-                        open_logs(&app_state.config)?;
-                    }
-                    KeyCode::Char(x) if x == app_state.config.key_config.authenticate_lights => {
-                        authenticate_lights(app_state).await?;
-                    }
-                    KeyCode::Char(x) if x == app_state.config.key_config.toggle_chat_lights => {
-                        toggle_chat_lights_callback(app_state);
-                    }
-                    _ => {}
-                }
+            for segment in &result.segments {
+                info!("Heard \"{}\"", segment.text);
+                log_sender
+                    .send(format!("Heard \"{}\"", segment.text))
+                    .unwrap();
             }
+            transcription_sender.send(result).unwrap();
         }
-
-        if last_tick.elapsed() >= tick_rate {
-            // Update application state
-            last_tick = Instant::now();
+        Err(e) => {
+            error!("Transcription failed: {}", e);
         }
     }
-
     Ok(())
 }
 
-fn ui(
-    f: &mut Frame,
-    microphones: &std::collections::HashMap<String, crate::microphone::Microphone>,
-    app_state: &AppState,
-) {
+async fn run_ui(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    microphones: HashMap<String, Microphone>,
+    mut app_state: AppState,
+    log_sender: UnboundedSender<String>,
+    mut log_receiver: UnboundedReceiver<String>,
+    mut transcription_receiver: UnboundedReceiver<TranscriptionResult>,
+) -> anyhow::Result<()> {
+    let tick_rate = Duration::from_millis(200);
+    let mut interval = tokio::time::interval(tick_rate);
+    let mut event_stream = EventStream::new();
+    loop {
+        let delay = interval.tick();
+        let crossterm_event = event_stream.next().fuse();
+        terminal.draw(|f| ui(f, &microphones, &app_state))?;
+        tokio::select! {
+            _ = delay => {
+                // this branch ensures the UI redraws frequently
+            }
+            maybe_event = crossterm_event => {
+                match maybe_event {
+                    Some(Ok(event)) => {
+                        if let CEvent::Key(key) = event {
+                            if key.kind != KeyEventKind::Press {
+                                continue;
+                            }
+                            handle_key_event(key, &mut app_state, terminal).await?;
+                        }
+                    }
+                    Some(Err(e)) => {
+                        error!("Error reading event: {}", e);
+                        app_state.push_activity_log(format!("Error reading event: {}", e));
+                    }
+                    None => {}
+                }
+            }
+            Some(log) = log_receiver.recv() => {
+                app_state.activity_log.push(log);
+            }
+            Some(transcription) = transcription_receiver.recv() => {
+                handle_transcription_result(&mut app_state, transcription, &log_sender).await?;
+            }
+        }
+    }
+}
+
+async fn handle_transcription_result(
+    app_state: &mut AppState,
+    transcription: TranscriptionResult,
+    log_sender: &UnboundedSender<String>,
+) -> anyhow::Result<()> {
+    let chat_light = app_state
+        .transcription_callbacks
+        .contains(&TranscriptionCallback::ChatLights);
+    for segment in &transcription.segments {
+        info!("Heard \"{}\"", segment.text);
+        log_sender
+            .send(format!("Heard \"{}\"", segment.text))
+            .unwrap();
+        if chat_light {
+            if let Err(e) = handle_hue_llm_voice_commands(&app_state, &segment.text) {
+                log_sender.send(format!("Error processing ChatLights: {}", e))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+enum KeyHandlerResult {
+    Continue,
+    Break,
+}
+async fn handle_key_event(
+    key: KeyEvent,
+    app_state: &mut AppState,
+    terminal: &mut DefaultTerminal,
+) -> anyhow::Result<KeyHandlerResult> {
+    match key.code {
+        KeyCode::Char(x) if x == app_state.config.key_config.quit => {
+            return Ok(KeyHandlerResult::Break);
+        }
+        KeyCode::Char(x) if x == app_state.config.key_config.help => {
+            app_state.push_activity_log("Help requested, TODO: implement this lol".to_string());
+        }
+        KeyCode::Char(x) if x == app_state.config.key_config.edit_config => {
+            edit_config(&app_state.config.config_editor, terminal)?;
+        }
+        KeyCode::Char(x) if x == app_state.config.key_config.open_config => {
+            open_config(&app_state.config.big_config_editor)?;
+        }
+        KeyCode::Char(x) if x == app_state.config.key_config.open_logs => {
+            open_logs(&app_state.config)?;
+        }
+        KeyCode::Char(x) if x == app_state.config.key_config.authenticate_lights => {
+            authenticate_lights(app_state).await?;
+        }
+        KeyCode::Char(x) if x == app_state.config.key_config.toggle_chat_lights => {
+            toggle_chat_lights_callback(app_state);
+        }
+        _ => {}
+    }
+    Ok(KeyHandlerResult::Continue)
+}
+
+fn ui(f: &mut Frame, microphones: &HashMap<String, Microphone>, app_state: &AppState) {
     let size = f.area();
 
     // Divide layout
@@ -274,10 +333,8 @@ fn ui(
             let text = "Please press the link button on the Hue bridge.";
             Paragraph::new(text).block(Block::default().borders(Borders::ALL).title("Lights"))
         }
-        LightAuthState::Authenticated { username } => {
-            // For now, just display that we're authenticated
-            // let text = format!("Authenticated with username: {}", username);
-            let text = format!("Authenticated with username: <redacted>");
+        LightAuthState::Authenticated => {
+            let text = format!("Authenticated");
             Paragraph::new(text).block(Block::default().borders(Borders::ALL).title("Lights"))
         }
     };
@@ -287,8 +344,6 @@ fn ui(
     // Activity log
     let log_items: Vec<ListItem> = app_state
         .activity_log
-        .lock()
-        .unwrap()
         .iter()
         .rev()
         .map(|entry| ListItem::new(entry.clone()))
@@ -305,7 +360,6 @@ fn ui(
         .iter()
         .map(|callback| match callback {
             TranscriptionCallback::WriteJsonLine => "WriteJsonLine",
-            TranscriptionCallback::SendTypewriterKeystrokes => "SendTypewriterKeystrokes",
             TranscriptionCallback::ChatLights => "ChatLights",
         })
         .collect();
@@ -320,15 +374,13 @@ fn ui(
 async fn authenticate_lights(app_state: &mut AppState) -> anyhow::Result<()> {
     // only proceed if not already authenticated
     if let LightAuthState::Authenticated { .. } = app_state.light_auth_state {
-        let mut log = app_state.activity_log.lock().unwrap();
-        log.push("Already authenticated with Hue bridge.".to_string());
+        app_state.push_activity_log("Already authenticated with Hue bridge.");
         return Ok(());
     }
 
     let bridge_ip = &app_state.config.hue_bridge_ip;
     if bridge_ip.is_empty() {
-        let mut log = app_state.activity_log.lock().unwrap();
-        log.push("Hue bridge IP not set in config.".to_string());
+        app_state.push_activity_log("Hue bridge IP not set in config.");
         return Ok(());
     }
 
@@ -341,7 +393,8 @@ async fn authenticate_lights(app_state: &mut AppState) -> anyhow::Result<()> {
     let response = client
         .post(&url)
         .json(&serde_json::json!({"devicetype": "mic_app#rust"}))
-        .send().await?;
+        .send()
+        .await?;
 
     let response_json: serde_json::Value = response.json().await?;
 
@@ -363,16 +416,13 @@ async fn authenticate_lights(app_state: &mut AppState) -> anyhow::Result<()> {
             .to_string();
 
         app_state.config.hue_username = Some(username.clone());
-        app_state.light_auth_state = LightAuthState::Authenticated {
-            username: username.clone(),
-        };
+        app_state.light_auth_state = LightAuthState::Authenticated;
 
         // Save the config with the new username
         let config_path = get_config_path()?;
         app_state.config.save(&config_path)?;
 
-        let mut log = app_state.activity_log.lock().unwrap();
-        log.push("Successfully authenticated with Hue bridge.".to_string());
+        app_state.push_activity_log("Successfully authenticated with Hue bridge.");
     } else if let Some(error) = first_item.get("error") {
         let error_type = error.get("type").and_then(|v| v.as_i64()).unwrap_or(0);
         let description = error
@@ -382,15 +432,16 @@ async fn authenticate_lights(app_state: &mut AppState) -> anyhow::Result<()> {
         if error_type == 101 {
             // link button not pressed
             app_state.light_auth_state = LightAuthState::AwaitingButtonPress;
-            let mut log = app_state.activity_log.lock().unwrap();
-            log.push("Please press the link button on the Hue bridge.".to_string());
+
+            app_state.push_activity_log("Please press the link button on the Hue bridge.");
         } else {
-            let mut log = app_state.activity_log.lock().unwrap();
-            log.push(format!("Error authenticating with Hue bridge: {}", description));
+            app_state.push_activity_log(format!(
+                "Error authenticating with Hue bridge: {}",
+                description
+            ));
         }
     } else {
-        let mut log = app_state.activity_log.lock().unwrap();
-        log.push("Unknown response from Hue bridge.".to_string());
+        app_state.push_activity_log("Unknown response from Hue bridge.");
     }
 
     Ok(())
@@ -460,14 +511,14 @@ fn toggle_chat_lights_callback(app_state: &mut AppState) {
         app_state
             .transcription_callbacks
             .retain(|c| c != &TranscriptionCallback::ChatLights);
-        let mut log = app_state.activity_log.lock().unwrap();
-        log.push("Disabled ChatLights callback.".to_string());
+
+        app_state.push_activity_log("Disabled ChatLights callback.".to_string());
     } else {
         app_state
             .transcription_callbacks
             .push(TranscriptionCallback::ChatLights);
-        let mut log = app_state.activity_log.lock().unwrap();
-        log.push("Enabled ChatLights callback.".to_string());
+
+        app_state.push_activity_log("Enabled ChatLights callback.".to_string());
     }
 }
 
@@ -479,13 +530,13 @@ struct LightUpdateResponse {
 #[derive(Serialize, Deserialize, Debug)]
 struct LightUpdate {
     light_id: u32,
-    hue: Option<u16>,        // Hue value between 0-65535
-    saturation: Option<u8>,  // Saturation between 0-254
-    brightness: Option<u8>,  // Brightness between 1-254
+    hue: Option<u16>,       // Hue value between 0-65535
+    saturation: Option<u8>, // Saturation between 0-254
+    brightness: Option<u8>, // Brightness between 1-254
     on: Option<bool>,
 }
 
-fn process_chat_lights(app_state: &AppState, transcript: &str) -> anyhow::Result<()> {
+fn handle_hue_llm_voice_commands(app_state: &AppState, transcript: &str) -> anyhow::Result<()> {
     info!("Processing ChatLights for \"{}\"", transcript);
     let client = reqwest::blocking::Client::new();
     let model_api_url = "http://localhost:11434/api/generate"; // TODO: make config variable
@@ -545,20 +596,19 @@ Respond only with the JSON output.
     if !light_updates.light_updates.is_empty() {
         // Send commands to the Hue bridge
         for update in light_updates.light_updates {
-            send_light_command(app_state, update)?;
+            send_hue_command(app_state, update)?;
         }
     }
 
     Ok(())
 }
 
-fn send_light_command(app_state: &AppState, update: LightUpdate) -> anyhow::Result<()> {
+fn send_hue_command(app_state: &AppState, update: LightUpdate) -> anyhow::Result<()> {
     let bridge_ip = &app_state.config.hue_bridge_ip;
     let username = match &app_state.config.hue_username {
         Some(u) => u,
         None => {
-            let mut log = app_state.activity_log.lock().unwrap();
-            log.push("Not authenticated with Hue bridge.".to_string());
+            app_state.push_activity_log("Not authenticated with Hue bridge.".to_string());
             return Ok(());
         }
     };
@@ -587,22 +637,17 @@ fn send_light_command(app_state: &AppState, update: LightUpdate) -> anyhow::Resu
         .danger_accept_invalid_certs(true)
         .build()?;
 
-    let response = client
-        .put(&url)
-        .json(&body)
-        .send()?;
+    let response = client.put(&url).json(&body).send()?;
 
     let response_json: serde_json::Value = response.json()?;
 
-    let mut log = app_state.activity_log.lock().unwrap();
-    log.push(format!(
+    app_state.push_activity_log(format!(
         "Sent light command to light {}: {:?}",
         update.light_id, response_json
     ));
 
     Ok(())
 }
-
 
 fn fetch_lights(config: &AppConfig) -> anyhow::Result<HashMap<u32, String>> {
     let bridge_ip = &config.hue_bridge_ip;
