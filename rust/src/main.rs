@@ -5,6 +5,8 @@ mod logging;
 mod microphone;
 mod transcription;
 mod ui;
+mod app_state;
+mod hue;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -94,7 +96,7 @@ async fn main() -> Result<()> {
         }
         None => {
             // Launch interactive application
-            ui::run_app(config).await?;
+            ui::run_app(config, config_path).await?;
         }
     }
 

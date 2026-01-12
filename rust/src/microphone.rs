@@ -46,12 +46,8 @@ pub fn hook_microphones(state: &mut AppState) -> anyhow::Result<()> {
     for (i, device) in devices.enumerate() {
         let name = device.name().unwrap_or_else(|_| format!("Unknown-{i}"));
 
-        let enabled = state
-            .config
-            .microphones
-            .get(&name)
-            .map(|config| config.enabled)
-            .unwrap_or(true);
+        let config = state.config.microphones.entry(name.clone()).or_default();
+        let enabled = config.enabled;
 
         let microphone = Microphone {
             name: name.clone(),
@@ -69,6 +65,8 @@ pub fn hook_microphones(state: &mut AppState) -> anyhow::Result<()> {
             info!("Skipping microphone {}", name);
         }
     }
+    // write the config since we may have added new microphones
+    state.config.save(&state.config_path)?;
     Ok(())
 }
 
