@@ -1,0 +1,22 @@
+[project]
+name = "voice2text"
+version = "0.1.0"
+description = "Transcribe audio using Whisper-X"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "decord>=0.6.0",
+    "loguru>=0.7.3",
+    "pyaudio>=0.2.14",
+    "pyautogui>=0.9.54",
+    "pynput>=1.8.1",
+    "speechrecognition>=3.14.4",
+    "torch>=2.5.1",
+
+    # Pin torchaudio to <2.9.0 due to AudioMetaData removal (whisperX incompatibility)
+    # https://github.com/m-bain/whisperX/issues/1270
+    # https://github.com/Aaronontheweb/witticism/commit/3fda63197fb27645d3b5fa96298b479a831f8287
+    # https://github.com/pyannote/pyannote-audio/issues/1952
+    "torchaudio>=2.0.0,<2.9.0",
+    "whisperx>=3.3.2",
+]
