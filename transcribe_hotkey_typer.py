@@ -66,14 +66,18 @@ async def start_transcription_worker(
 ):
     try:
         logger.info("Loading whisperx model")
-        if torch.cuda.is_available():
-            # https://huggingface.co/openai/whisper-large-v2
-            model = "large-v2"
-            audio_model = whisperx.load_model(model, device="cuda", language="en")
-        else:
-            # https://huggingface.co/openai/whisper-small.en
-            model = "small.en"
-            audio_model = whisperx.load_model(model, device="cpu", language="en", compute_type="float32")
+        try:
+            if torch.cuda.is_available():
+                # https://huggingface.co/openai/whisper-large-v2
+                model = "large-v2"
+                audio_model = whisperx.load_model(model, device="cuda", language="en")
+            else:
+                # https://huggingface.co/openai/whisper-small.en
+                model = "small.en"
+                audio_model = whisperx.load_model(model, device="cpu", language="en", compute_type="float32")
+        except Exception as e:
+            logger.exception("Failed to load model: {}", e)
+            raise e
 
         logger.info("Starting transcriber main loop")
         while not stop_future.done():
