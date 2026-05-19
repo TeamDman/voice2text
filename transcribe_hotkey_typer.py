@@ -5,6 +5,7 @@ import aiohttp.web
 import asyncio
 import json
 import numpy as np
+import os
 import pyautogui
 import speech_recognition as sr
 import ssl
@@ -12,6 +13,65 @@ import threading
 import torch
 import uuid
 import whisperx
+import winsound
+
+TARGET_MICROPHONE_NAME = "Microphone (WOER)"
+DEFAULT_TOGGLE_INACTIVITY_TIMEOUT_SECONDS = 100.0
+DEFAULT_SOUND_TOGGLE_ON = "SystemAsterisk"
+DEFAULT_SOUND_TOGGLE_OFF = "SystemHand"
+DEFAULT_SOUND_TOGGLE_STILL_LISTENING = "SystemQuestion"
+DEFAULT_SOUND_PUSH_TO_TALK_PRESS = "SystemExclamation"
+DEFAULT_SOUND_PUSH_TO_TALK_RELEASE = "SystemExit"
+
+
+class SoundPlayer:
+    def __init__(self, sound_by_event: dict[str, Optional[str]]):
+        self.sound_by_event = sound_by_event
+
+    def play(self, event: str):
+        sound = self.sound_by_event.get(event)
+        if not sound:
+            return
+
+        flags = winsound.SND_ASYNC
+        if os.path.exists(sound):
+            flags |= winsound.SND_FILENAME
+        else:
+            flags |= winsound.SND_ALIAS
+
+        try:
+            winsound.PlaySound(sound, flags)
+        except RuntimeError as error:
+            logger.warning("Failed to play sound for {} using {!r}: {}", event, sound, error)
+
+
+def find_target_microphones() -> list[tuple[int, str]]:
+    return [
+        (index, name)
+        for index, name in enumerate(sr.Microphone.list_microphone_names())
+        if name == TARGET_MICROPHONE_NAME
+    ]
+
+
+def close_microphone(source: sr.Microphone):
+    stream = getattr(source, "stream", None)
+    audio = getattr(source, "audio", None)
+
+    try:
+        if stream is not None:
+            stream.close()
+    except Exception as error:
+        logger.warning("Microphone stream close failed during reconnect: {}", error)
+    finally:
+        source.stream = None
+
+    if audio is not None:
+        try:
+            audio.terminate()
+        except Exception as error:
+            logger.warning("Microphone audio interface termination failed during reconnect: {}", error)
+        finally:
+            source.audio = None
 
 async def start_microphone_worker(
     audio_queue: asyncio.Queue[torch.Tensor],
@@ -20,7 +80,8 @@ async def start_microphone_worker(
     energy: int,
     pause: float,
     dynamic_energy: bool,
-    stop_future: asyncio.Future
+    stop_future: asyncio.Future,
+    on_keyboard_audio: Optional[Callable[[], None]] = None,
 ):
     try:
         r = sr.Recognizer()
@@ -32,10 +93,14 @@ async def start_microphone_worker(
 
         logger.info("Starting listener main loop")
         logbackoff = 0
+        microphone_present = None
         while not stop_future.done():
             try:
-                desired = [(i,v) for i,v in enumerate(sr.Microphone.list_microphone_names()) if v == "Microphone (WOER)"]
+                desired = find_target_microphones()
                 if len(desired) == 0:
+                    if microphone_present is True:
+                        logger.warning("Desired microphone detached: {}", TARGET_MICROPHONE_NAME)
+                    microphone_present = False
                     if logbackoff > 0:
                         logbackoff -= 1
                     else:
@@ -43,18 +108,40 @@ async def start_microphone_worker(
                         logbackoff = 10
                     await asyncio.sleep(1)
                     continue
-                with sr.Microphone(sample_rate=16000, device_index=desired[0][0]) as source:
-                    logger.info("Found microphone")
+
+                device_index, _ = desired[0]
+                if microphone_present is not True:
+                    logger.info("Desired microphone attached: {} on device index {}", TARGET_MICROPHONE_NAME, device_index)
+                microphone_present = True
+                logbackoff = 0
+
+                source = sr.Microphone(sample_rate=16000, device_index=device_index)
+                try:
+                    source.__enter__()
+                    if source.stream is None:
+                        raise RuntimeError("Microphone opened without an active stream")
+
+                    logger.info("Connected to desired microphone on device index {}", device_index)
                     while not stop_future.done():
-                        audio = await loop.run_in_executor(None, r.listen, source)
+                        try:
+                            audio = await loop.run_in_executor(None, r.listen, source)
+                        except (AssertionError, OSError) as error:
+                            logger.warning("Microphone stream lost on device index {}, reconnecting: {}", device_index, error)
+                            break
+
                         if keyboard_says_listen.is_set() or api_says_listen.is_set():
                             logger.info("Got audio, was listening")
+                            if keyboard_says_listen.is_set() and on_keyboard_audio is not None:
+                                on_keyboard_audio()
                             np_audio = np.frombuffer(audio.get_raw_data(), np.int16).flatten().astype(np.float32) / 32768.0
                             await audio_queue.put(np_audio)
                         else:
                             logger.info("Got audio, wasn't listening")
-            except OSError:
-                logger.exception(f"Microphone error, was it unplugged?")
+                finally:
+                    close_microphone(source)
+            except Exception as error:
+                logger.warning("Microphone connection failed, retrying: {}", error)
+                await asyncio.sleep(1)
         logger.info("Listener main loop finished")
     except Exception as e:
         logger.exception("Listener main loop crashed: {}", e)
@@ -93,9 +180,34 @@ async def start_transcription_worker(
 async def start_keyboard_worker(
     keyboard_says_listen: asyncio.Event,
     api_says_listen: asyncio.Event,
-    stop_future: asyncio.Future
+    stop_future: asyncio.Future,
+    toggle_inactivity_timeout_seconds: float,
+    sound_player: SoundPlayer,
+    on_activity_callback_ready: Callable[[Callable[[], None]], None],
 ):
     try:
+        loop = asyncio.get_running_loop()
+        push_to_talk_active = False
+        toggle_active = False
+        latest_toggle_activity = loop.time()
+
+        def refresh_keyboard_state():
+            if push_to_talk_active or toggle_active:
+                keyboard_says_listen.set()
+            else:
+                keyboard_says_listen.clear()
+
+        def mark_toggle_activity():
+            nonlocal latest_toggle_activity
+            if toggle_active:
+                latest_toggle_activity = loop.time()
+                sound_player.play("toggle_still_listening")
+
+        def mark_toggle_activity_threadsafe():
+            loop.call_soon_threadsafe(mark_toggle_activity)
+
+        on_activity_callback_ready(mark_toggle_activity_threadsafe)
+
         def is_push_to_talk_key(key):
             return key == keyboard.Key.f23
 
@@ -103,23 +215,58 @@ async def start_keyboard_worker(
             return key == keyboard.Key.pause
 
         def on_press(key):
-            if is_push_to_talk_key(key):
-                if not keyboard_says_listen.is_set():
-                    logger.info("Push-to-talk key pressed, starting transcription.")
-                    keyboard_says_listen.set()
-            elif is_toggle_key(key):
-                if keyboard_says_listen.is_set():
-                    logger.info("Toggle key pressed, stopping transcription.")
-                    keyboard_says_listen.clear()
+            def update_state():
+                nonlocal push_to_talk_active, toggle_active, latest_toggle_activity
+                if is_push_to_talk_key(key):
+                    if not push_to_talk_active:
+                        logger.info("Push-to-talk key pressed, starting transcription.")
+                        sound_player.play("push_to_talk_press")
+                    push_to_talk_active = True
+                elif is_toggle_key(key):
+                    if toggle_active:
+                        logger.info("Toggle key pressed, stopping transcription.")
+                        toggle_active = False
+                        sound_player.play("toggle_off")
+                    else:
+                        logger.info("Toggle key pressed, starting transcription.")
+                        toggle_active = True
+                        latest_toggle_activity = loop.time()
+                        sound_player.play("toggle_on")
                 else:
-                    logger.info("Toggle key pressed, starting transcription.")
-                    keyboard_says_listen.set()
-            api_says_listen.clear()  # Clear API listening state on manual activation
+                    return
+                refresh_keyboard_state()
+                api_says_listen.clear()  # Clear API listening state on manual activation
+
+            loop.call_soon_threadsafe(update_state)
 
         def on_release(key):
-            if is_push_to_talk_key(key) and keyboard_says_listen.is_set():
-                logger.info("Push-to-talk key released, stopping transcription.")
-                keyboard_says_listen.clear()
+            def update_state():
+                nonlocal push_to_talk_active
+                if is_push_to_talk_key(key) and push_to_talk_active:
+                    logger.info("Push-to-talk key released, stopping transcription.")
+                    push_to_talk_active = False
+                    sound_player.play("push_to_talk_release")
+                    refresh_keyboard_state()
+
+            loop.call_soon_threadsafe(update_state)
+
+        async def auto_disable_toggle_worker():
+            nonlocal toggle_active
+            while not stop_future.done():
+                await asyncio.sleep(1)
+                if (
+                    toggle_active
+                    and loop.time() - latest_toggle_activity >= toggle_inactivity_timeout_seconds
+                ):
+                    logger.info(
+                        "Toggle inactive for {} seconds, stopping transcription.",
+                        toggle_inactivity_timeout_seconds,
+                    )
+                    toggle_active = False
+                    sound_player.play("toggle_off")
+                    refresh_keyboard_state()
+
+        asyncio.create_task(auto_disable_toggle_worker())
 
         def listen_for_keys():
             with keyboard.Listener(on_press=on_press, on_release=on_release) as listener:
@@ -303,10 +450,31 @@ async def start_router_worker(api_says_listen: asyncio.Event, result_queue: asyn
 async def main():
     try:
         import sys
-        import os
         
         port = os.getenv('port')
         api_key = os.getenv('api_key')
+        toggle_inactivity_timeout_seconds = float(
+            os.getenv(
+                'TOGGLE_INACTIVITY_TIMEOUT_SECONDS',
+                str(DEFAULT_TOGGLE_INACTIVITY_TIMEOUT_SECONDS),
+            )
+        )
+        sound_player = SoundPlayer({
+            "toggle_on": os.getenv("SOUND_TOGGLE_ON", DEFAULT_SOUND_TOGGLE_ON),
+            "toggle_off": os.getenv("SOUND_TOGGLE_OFF", DEFAULT_SOUND_TOGGLE_OFF),
+            "toggle_still_listening": os.getenv(
+                "SOUND_TOGGLE_STILL_LISTENING",
+                DEFAULT_SOUND_TOGGLE_STILL_LISTENING,
+            ),
+            "push_to_talk_press": os.getenv(
+                "SOUND_PUSH_TO_TALK_PRESS",
+                DEFAULT_SOUND_PUSH_TO_TALK_PRESS,
+            ),
+            "push_to_talk_release": os.getenv(
+                "SOUND_PUSH_TO_TALK_RELEASE",
+                DEFAULT_SOUND_PUSH_TO_TALK_RELEASE,
+            ),
+        })
 
 
         # if len(sys.argv) > 2:
@@ -322,6 +490,15 @@ async def main():
         audio_queue: asyncio.Queue[torch.Tensor] = asyncio.Queue()
         result_queue: asyncio.Queue[str] = asyncio.Queue()
         typewriter_queue: asyncio.Queue[str] = asyncio.Queue()
+        keyboard_activity_callback: Optional[Callable[[], None]] = None
+
+        def set_keyboard_activity_callback(callback: Callable[[], None]):
+            nonlocal keyboard_activity_callback
+            keyboard_activity_callback = callback
+
+        def on_keyboard_audio():
+            if keyboard_activity_callback is not None:
+                keyboard_activity_callback()
 
         logger.info("Starting microphone worker")
         asyncio.create_task(
@@ -333,6 +510,7 @@ async def main():
                 pause=0.8,
                 dynamic_energy=False,
                 stop_future=stop_future,
+                on_keyboard_audio=on_keyboard_audio,
             )
         )
 
@@ -340,7 +518,16 @@ async def main():
         asyncio.create_task(start_transcription_worker(audio_queue, result_queue, stop_future))
 
         logger.info("Starting keyboard worker")
-        asyncio.create_task(start_keyboard_worker(keyboard_says_listen, api_says_listen, stop_future))
+        asyncio.create_task(
+            start_keyboard_worker(
+                keyboard_says_listen,
+                api_says_listen,
+                stop_future,
+                toggle_inactivity_timeout_seconds=toggle_inactivity_timeout_seconds,
+                sound_player=sound_player,
+                on_activity_callback_ready=set_keyboard_activity_callback,
+            )
+        )
 
         logger.info("Starting background router")
         asyncio.create_task(start_router_worker(api_says_listen, result_queue, typewriter_queue, stop_future))
