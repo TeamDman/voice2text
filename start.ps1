@@ -27,7 +27,7 @@ if ($null -eq $Env:SOUND_TOGGLE_STILL_LISTENING) {
     $Env:SOUND_TOGGLE_STILL_LISTENING="SystemQuestion"
 }
 if ($null -eq $Env:SOUND_PUSH_TO_TALK_PRESS) {
-    $Env:SOUND_PUSH_TO_TALK_PRESS="SystemExclamation"
+    $Env:SOUND_PUSH_TO_TALK_PRESS="SystemDefault"
 }
 if ($null -eq $Env:SOUND_PUSH_TO_TALK_RELEASE) {
     $Env:SOUND_PUSH_TO_TALK_RELEASE="SystemExit"
